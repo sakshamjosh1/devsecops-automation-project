@@ -58,32 +58,35 @@ pipeline {
     }
 
     stage('Scan Image (Trivy)') {
-      when {
-        expression { return params.SKIP_TRIVY == false }
-      }
-      steps {
-        script {
-          // Ensure TRIVY cache dir exists and is writeable - create if missing
-          // The Jenkins user must have permission to write to TRIVY_CACHE_DIR on the host.
-          sh """
-            set -e
-            echo "Preparing Trivy cache directory: ${TRIVY_CACHE_DIR}"
-            mkdir -p "${TRIVY_CACHE_DIR}"
+  when {
+    expression { return params.SKIP_TRIVY == false }
+  }
+  steps {
+    script {
+      sh '''
+        set -e
 
-            echo "Downloading/updating Trivy DB to cache (first run will download DB)..."
-            docker run --rm -v "${TRIVY_CACHE_DIR}":/root/.cache/trivy aquasec/trivy:latest --download-db-only
+        # Use JENKINS_HOME if available, otherwise fallback to /var/lib/jenkins
+        TRIVY_CACHE_DIR="${JENKINS_HOME:-/var/lib/jenkins}/trivy-cache"
+        echo "Using Trivy cache dir: $TRIVY_CACHE_DIR"
 
-            echo "Scanning image ${IMAGE_NAME}:${IMAGE_TAG} with Trivy (FAIL on HIGH/CRITICAL)..."
-            # Use cached DB to speed up scans. Remove --skip-db-update if you want a fresh DB each time.
-            docker run --rm \
-              -v "${TRIVY_CACHE_DIR}":/root/.cache/trivy \
-              -v /var/run/docker.sock:/var/run/docker.sock \
-              aquasec/trivy:latest image --skip-db-update --exit-code 1 --severity HIGH,CRITICAL ${IMAGE_NAME}:${IMAGE_TAG} \
-              || (echo "Trivy found HIGH/CRITICAL vulnerabilities" && exit 1)
-          """
-        }
-      }
+        # make the dir (will fail if Jenkins user can't write at parent — see Option A to fix host)
+        mkdir -p "$TRIVY_CACHE_DIR"
+
+        echo "Downloading/updating Trivy DB to cache (first run may take a while)..."
+        docker run --rm -v "$TRIVY_CACHE_DIR":/root/.cache/trivy aquasec/trivy:latest --download-db-only
+
+        echo "Scanning image ${IMAGE_NAME}:${IMAGE_TAG} with Trivy..."
+        docker run --rm \
+          -v "$TRIVY_CACHE_DIR":/root/.cache/trivy \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          aquasec/trivy:latest image --skip-db-update --exit-code 1 --severity HIGH,CRITICAL ${IMAGE_NAME}:${IMAGE_TAG} \
+          || (echo "Trivy found HIGH/CRITICAL vulnerabilities" && exit 1)
+      '''
     }
+  }
+}
+
 
     stage('Push to Docker Hub') {
       when {
