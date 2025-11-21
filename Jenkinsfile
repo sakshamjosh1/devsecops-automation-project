@@ -1,4 +1,4 @@
-// Jenkinsfile (Declarative Pipeline) - fixed version
+// Jenkinsfile (Declarative Pipeline) - SonarQube version
 pipeline {
   agent any
 
@@ -8,13 +8,16 @@ pipeline {
     // Use BUILD_NUMBER as a tag; fallback to "local" if for some reason BUILD_NUMBER is empty
     IMAGE_TAG  = "${env.BUILD_NUMBER ?: 'local'}"
 
-    // Persistent cache directory for Trivy DB on the Jenkins host
-    TRIVY_CACHE_DIR = "/var/jenkins_home/trivy-cache"
+    // Sonar settings - update these to match your Jenkins configuration
+    // SONAR_SERVER is the *name* of the SonarQube server configured in Jenkins (Manage Jenkins → Configure System)
+    // SONAR_CREDENTIALS should be the credentialsId of a "Secret Text" credential holding your Sonar token
+    SONAR_SERVER      = "SonarQube"
+    SONAR_CREDENTIALS = "sonar-token"
   }
 
   parameters {
     booleanParam(name: 'PUSH_TO_REGISTRY', defaultValue: false, description: 'If true, push image to Docker Hub after scan')
-    booleanParam(name: 'SKIP_TRIVY', defaultValue: false, description: 'If true, skip Trivy image scan (useful for testing)')
+    booleanParam(name: 'SKIP_SONAR', defaultValue: false, description: 'If true, skip SonarQube analysis (useful for testing)')
   }
 
   stages {
@@ -57,36 +60,27 @@ pipeline {
       }
     }
 
-    stage('Scan Image (Trivy)') {
-  when {
-    expression { return params.SKIP_TRIVY == false }
-  }
-  steps {
-    script {
-      sh '''
-        set -e
-
-        # Use JENKINS_HOME if available, otherwise fallback to /var/lib/jenkins
-        TRIVY_CACHE_DIR="${JENKINS_HOME:-/var/lib/jenkins}/trivy-cache"
-        echo "Using Trivy cache dir: $TRIVY_CACHE_DIR"
-
-        # make the dir (will fail if Jenkins user can't write at parent — see Option A to fix host)
-        mkdir -p "$TRIVY_CACHE_DIR"
-
-        echo "Downloading/updating Trivy DB to cache (first run may take a while)..."
-        docker run --rm -v "$TRIVY_CACHE_DIR":/root/.cache/trivy aquasec/trivy:latest --download-db-only
-
-        echo "Scanning image ${IMAGE_NAME}:${IMAGE_TAG} with Trivy..."
-        docker run --rm \
-          -v "$TRIVY_CACHE_DIR":/root/.cache/trivy \
-          -v /var/run/docker.sock:/var/run/docker.sock \
-          aquasec/trivy:latest image --skip-db-update --exit-code 1 --severity HIGH,CRITICAL ${IMAGE_NAME}:${IMAGE_TAG} \
-          || (echo "Trivy found HIGH/CRITICAL vulnerabilities" && exit 1)
-      '''
+    stage('SonarQube Analysis') {
+      when {
+        expression { return params.SKIP_SONAR == false }
+      }
+      steps {
+        script {
+          // Use the configured Sonar server and credentials
+          withCredentials([string(credentialsId: env.SONAR_CREDENTIALS, variable: 'SONAR_TOKEN')]) {
+            // withSonarQubeEnv injects SONAR_HOST_URL and other env vars for the configured server
+            // 'SONAR_SERVER' must match a SonarQube server name in Jenkins global configuration
+            withSonarQubeEnv(env.SONAR_SERVER) {
+              sh '''
+                set -e
+                echo "Running SonarQube analysis (server: ${SONAR_SERVER})..."
+                mvn -B sonar:sonar -Dsonar.login=$SONAR_TOKEN
+              '''
+            }
+          }
+        }
+      }
     }
-  }
-}
-
 
     stage('Push to Docker Hub') {
       when {
@@ -122,7 +116,6 @@ pipeline {
   post {
     always {
       echo "Running post actions: junit and artifact archive"
-      // Collect test results (allowEmptyResults: true so Jenkins doesn't fail if no xmls found)
       junit allowEmptyResults: true, testResults: 'target/surefire-reports/*.xml'
       archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
       echo "Post actions complete."
