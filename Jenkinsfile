@@ -1,19 +1,15 @@
-// Complete Jenkinsfile (Declarative Pipeline)
-// - Builds & tests with Maven
-// - Builds Docker image
-// - Scans image with Trivy (fails on HIGH/CRITICAL)
-// - Optionally pushes image to Docker Hub using Jenkins credentials (dockerhub-creds)
-// - Archives artifacts and records JUnit test results (allows empty results)
-
+// Jenkinsfile (Declarative Pipeline) - fixed version
 pipeline {
   agent any
 
   environment {
+    // Basic image info
     IMAGE_NAME = "devsecops-simple"
-    // IMAGE_TAG will default to BUILD_NUMBER; falls back to "local" if missing
+    // Use BUILD_NUMBER as a tag; fallback to "local" if for some reason BUILD_NUMBER is empty
     IMAGE_TAG  = "${env.BUILD_NUMBER ?: 'local'}"
-    // The FULL_IMAGE will be formed at runtime using the Jenkins-provided DOCKERHUB_USER
-    // (when pushing we will tag/push with: <DOCKERHUB_USER>/devsecops-simple:<IMAGE_TAG>)
+
+    // Persistent cache directory for Trivy DB on the Jenkins host
+    TRIVY_CACHE_DIR = "/var/jenkins_home/trivy-cache"
   }
 
   parameters {
@@ -25,27 +21,36 @@ pipeline {
 
     stage('Checkout') {
       steps {
+        echo "Checking out repository..."
         checkout scm
       }
     }
 
     stage('Build & Test') {
       steps {
-        echo "Running mvn -B clean test package"
-        sh 'mvn -B clean test package'
+        echo "Running: mvn -B clean test package"
+        sh '''
+          set -e
+          mvn -B clean test package
+        '''
       }
     }
 
     stage('Build Docker Image') {
       steps {
         script {
-          // Build a local image tagged as IMAGE_NAME:latest
-          sh """
-            docker build -t ${IMAGE_NAME}:latest .
-          """
+          // Disable BuildKit for compatibility with systems missing buildx
+          withEnv(['DOCKER_BUILDKIT=0']) {
+            echo "Building Docker image ${IMAGE_NAME}:latest (BuildKit disabled)"
+            sh """
+              set -e
+              docker build -t ${IMAGE_NAME}:latest .
+            """
+          }
 
-          // Tag with a stable build tag (we'll retag with Docker Hub user later if pushing)
+          echo "Tagging image ${IMAGE_NAME}:latest -> ${IMAGE_NAME}:${IMAGE_TAG}"
           sh """
+            set -e
             docker tag ${IMAGE_NAME}:latest ${IMAGE_NAME}:${IMAGE_TAG}
           """
         }
@@ -58,14 +63,24 @@ pipeline {
       }
       steps {
         script {
-          // Run Trivy container to scan the local image.
-          // Use --exit-code 1 to fail pipeline on HIGH/CRITICAL findings.
-          // --skip-update speeds up scans by not updating DB; remove if you want fresh DB.
-          sh '''
-            echo "Scanning image ${IMAGE_NAME}:latest with Trivy (HIGH/CRITICAL will fail)..."
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-              aquasec/trivy:latest image --skip-update --exit-code 1 --severity HIGH,CRITICAL ${IMAGE_NAME}:latest || (echo "Trivy found HIGH/CRITICAL vulnerabilities" && exit 1)
-          '''
+          // Ensure TRIVY cache dir exists and is writeable - create if missing
+          // The Jenkins user must have permission to write to TRIVY_CACHE_DIR on the host.
+          sh """
+            set -e
+            echo "Preparing Trivy cache directory: ${TRIVY_CACHE_DIR}"
+            mkdir -p "${TRIVY_CACHE_DIR}"
+
+            echo "Downloading/updating Trivy DB to cache (first run will download DB)..."
+            docker run --rm -v "${TRIVY_CACHE_DIR}":/root/.cache/trivy aquasec/trivy:latest --download-db-only
+
+            echo "Scanning image ${IMAGE_NAME}:${IMAGE_TAG} with Trivy (FAIL on HIGH/CRITICAL)..."
+            # Use cached DB to speed up scans. Remove --skip-db-update if you want a fresh DB each time.
+            docker run --rm \
+              -v "${TRIVY_CACHE_DIR}":/root/.cache/trivy \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:latest image --skip-db-update --exit-code 1 --severity HIGH,CRITICAL ${IMAGE_NAME}:${IMAGE_TAG} \
+              || (echo "Trivy found HIGH/CRITICAL vulnerabilities" && exit 1)
+          """
         }
       }
     }
@@ -77,23 +92,20 @@ pipeline {
         }
       }
       steps {
-        // Use Jenkins credentials store to inject username/password safely
         withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
           script {
-            // Tag the image with the DockerHub username and the build tag, then push
             sh '''
+              set -e
               echo "Logging into Docker Hub as $DOCKERHUB_USER"
               echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
 
-              # tag the image for your registry
-              docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${DOCKERHUB_USER}/${IMAGE_NAME}:${IMAGE_TAG}
+              echo "Tagging and pushing: ${IMAGE_NAME}:${IMAGE_TAG} -> $DOCKERHUB_USER/${IMAGE_NAME}:${IMAGE_TAG}"
+              docker tag ${IMAGE_NAME}:${IMAGE_TAG} $DOCKERHUB_USER/${IMAGE_NAME}:${IMAGE_TAG}
+              docker push $DOCKERHUB_USER/${IMAGE_NAME}:${IMAGE_TAG}
 
-              # push the tag
-              docker push ${DOCKERHUB_USER}/${IMAGE_NAME}:${IMAGE_TAG}
-
-              # also update 'latest' tag on registry (optional)
-              docker tag ${IMAGE_NAME}:latest ${DOCKERHUB_USER}/${IMAGE_NAME}:latest
-              docker push ${DOCKERHUB_USER}/${IMAGE_NAME}:latest
+              echo "Updating latest tag and pushing"
+              docker tag ${IMAGE_NAME}:latest $DOCKERHUB_USER/${IMAGE_NAME}:latest
+              docker push $DOCKERHUB_USER/${IMAGE_NAME}:latest
 
               docker logout
             '''
@@ -106,13 +118,14 @@ pipeline {
 
   post {
     always {
-      // Collect test results (allow empty) and archive jar artifact
+      echo "Running post actions: junit and artifact archive"
+      // Collect test results (allowEmptyResults: true so Jenkins doesn't fail if no xmls found)
       junit allowEmptyResults: true, testResults: 'target/surefire-reports/*.xml'
       archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
       echo "Post actions complete."
     }
     success {
-      echo "Pipeline finished SUCCESSFULLY — build ${IMAGE_TAG}"
+      echo "Pipeline finished SUCCESSFULLY — image: ${IMAGE_NAME}:${IMAGE_TAG}"
     }
     failure {
       echo "Pipeline FAILED — inspect console output for details."
