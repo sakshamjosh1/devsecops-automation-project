@@ -1,20 +1,15 @@
-// Jenkinsfile (Declarative Pipeline) - Full file (copy/paste ready)
-// Notes:
-// - Create a "Secret text" credential in Jenkins with ID matching SONAR_CREDENTIALS (default: sonar-token)
-// - Configure a SonarQube server in Manage Jenkins -> Configure System with name matching SONAR_SERVER (default: SonarQube)
+// Jenkinsfile (Declarative Pipeline) - Full file (safe Sonar behavior)
+// Behavior: If Sonar credential is missing, the pipeline will mark the build UNSTABLE and continue.
+// To force a hard failure on missing credential, change the catch block to call error(...).
 
 pipeline {
   agent any
 
   environment {
-    // Basic image info
     IMAGE_NAME = "devsecops-simple"
-    // Use BUILD_NUMBER as a tag; fallback to "local" if for some reason BUILD_NUMBER is empty
     IMAGE_TAG  = "${env.BUILD_NUMBER ?: 'local'}"
 
     // Sonar settings - update these to match your Jenkins configuration
-    // SONAR_SERVER is the *name* of the SonarQube server configured in Jenkins (Manage Jenkins → Configure System)
-    // SONAR_CREDENTIALS should be the credentialsId of a "Secret Text" credential holding your Sonar token
     SONAR_SERVER      = "SonarQube"
     SONAR_CREDENTIALS = "sonar-token"
   }
@@ -22,6 +17,7 @@ pipeline {
   parameters {
     booleanParam(name: 'PUSH_TO_REGISTRY', defaultValue: false, description: 'If true, push image to Docker Hub after scan')
     booleanParam(name: 'SKIP_SONAR', defaultValue: false, description: 'If true, skip SonarQube analysis (useful for testing)')
+    booleanParam(name: 'FAIL_ON_MISSING_SONAR_CREDENTIAL', defaultValue: false, description: 'If true, fail build when Sonar credential is missing (default: continue as UNSTABLE)')
   }
 
   stages {
@@ -46,7 +42,6 @@ pipeline {
     stage('Build Docker Image') {
       steps {
         script {
-          // Disable BuildKit for compatibility with systems missing buildx
           withEnv(['DOCKER_BUILDKIT=0']) {
             echo "Building Docker image ${IMAGE_NAME}:latest (BuildKit disabled)"
             sh """
@@ -66,15 +61,16 @@ pipeline {
 
     stage('SonarQube Analysis') {
       when {
-        expression { return params.SKIP_SONAR == false }
+        allOf {
+          expression { return params.SKIP_SONAR == false }
+        }
       }
       steps {
         script {
-          // Wrap in try/catch to give a friendly error if credentials are missing or Sonar is misconfigured
           try {
-            // Fetch token from Jenkins credentials (Secret text)
+            // Attempt to fetch Sonar token from Jenkins credentials
             withCredentials([string(credentialsId: env.SONAR_CREDENTIALS, variable: 'SONAR_TOKEN')]) {
-              // withSonarQubeEnv will set SONAR_HOST_URL (and other env vars) based on the server name configured in Jenkins
+              // Ensure a SonarQube server with the given name exists in Jenkins Configure System
               withSonarQubeEnv(env.SONAR_SERVER) {
                 sh '''
                   set -e
@@ -83,18 +79,26 @@ pipeline {
                 '''
               }
             }
-          } catch (err) {
+          } catch (Exception err) {
             echo "-----------------------------------------------------------------"
-            echo "ERROR: SonarQube analysis failed or Sonar credentials missing."
-            echo "Details: ${err}"
+            echo "WARNING: SonarQube analysis skipped / could not run."
+            echo "Reason: ${err}"
             echo ""
-            echo "Fix options:"
+            echo "If you want Sonar to run, please do one of the following:"
             echo "  1) Create a 'Secret text' credential in Jenkins with ID '${env.SONAR_CREDENTIALS}' containing your Sonar token"
             echo "     (Manage Jenkins → Manage Credentials → (global) → Add Credentials → Kind: Secret text)."
             echo "  2) Ensure a SonarQube server with name '${env.SONAR_SERVER}' is configured in Jenkins (Manage Jenkins → Configure System → SonarQube servers)."
-            echo "  3) Or run the job with SKIP_SONAR=true to skip SonarQube analysis."
+            echo "  3) Or run the job with SKIP_SONAR=true to skip SonarQube analysis entirely."
             echo "-----------------------------------------------------------------"
-            error("SonarQube analysis aborted: ${err}")
+
+            if (params.FAIL_ON_MISSING_SONAR_CREDENTIAL) {
+              // Optionally fail hard if the parameter is set
+              error("SonarQube analysis aborted due to missing credentials or misconfiguration.")
+            } else {
+              // Mark the build UNSTABLE and continue
+              currentBuild.result = 'UNSTABLE'
+              echo "Build marked UNSTABLE because SonarQube analysis couldn't run."
+            }
           }
         }
       }
@@ -102,9 +106,7 @@ pipeline {
 
     stage('Push to Docker Hub') {
       when {
-        allOf {
-          expression { return params.PUSH_TO_REGISTRY == true }
-        }
+        expression { return params.PUSH_TO_REGISTRY == true }
       }
       steps {
         withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
@@ -140,6 +142,9 @@ pipeline {
     }
     success {
       echo "Pipeline finished SUCCESSFULLY — image: ${IMAGE_NAME}:${IMAGE_TAG}"
+    }
+    unstable {
+      echo "Pipeline finished UNSTABLE — check warnings (e.g., Sonar skipped/missing credentials)."
     }
     failure {
       echo "Pipeline FAILED — inspect console output for details."
