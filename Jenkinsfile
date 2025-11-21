@@ -1,4 +1,8 @@
-// Jenkinsfile (Declarative Pipeline) - SonarQube version
+// Jenkinsfile (Declarative Pipeline) - Full file (copy/paste ready)
+// Notes:
+// - Create a "Secret text" credential in Jenkins with ID matching SONAR_CREDENTIALS (default: sonar-token)
+// - Configure a SonarQube server in Manage Jenkins -> Configure System with name matching SONAR_SERVER (default: SonarQube)
+
 pipeline {
   agent any
 
@@ -66,17 +70,31 @@ pipeline {
       }
       steps {
         script {
-          // Use the configured Sonar server and credentials
-          withCredentials([string(credentialsId: env.SONAR_CREDENTIALS, variable: 'SONAR_TOKEN')]) {
-            // withSonarQubeEnv injects SONAR_HOST_URL and other env vars for the configured server
-            // 'SONAR_SERVER' must match a SonarQube server name in Jenkins global configuration
-            withSonarQubeEnv(env.SONAR_SERVER) {
-              sh '''
-                set -e
-                echo "Running SonarQube analysis (server: ${SONAR_SERVER})..."
-                mvn -B sonar:sonar -Dsonar.login=$SONAR_TOKEN
-              '''
+          // Wrap in try/catch to give a friendly error if credentials are missing or Sonar is misconfigured
+          try {
+            // Fetch token from Jenkins credentials (Secret text)
+            withCredentials([string(credentialsId: env.SONAR_CREDENTIALS, variable: 'SONAR_TOKEN')]) {
+              // withSonarQubeEnv will set SONAR_HOST_URL (and other env vars) based on the server name configured in Jenkins
+              withSonarQubeEnv(env.SONAR_SERVER) {
+                sh '''
+                  set -e
+                  echo "Running SonarQube analysis (server: ${SONAR_SERVER})..."
+                  mvn -B sonar:sonar -Dsonar.login=$SONAR_TOKEN
+                '''
+              }
             }
+          } catch (err) {
+            echo "-----------------------------------------------------------------"
+            echo "ERROR: SonarQube analysis failed or Sonar credentials missing."
+            echo "Details: ${err}"
+            echo ""
+            echo "Fix options:"
+            echo "  1) Create a 'Secret text' credential in Jenkins with ID '${env.SONAR_CREDENTIALS}' containing your Sonar token"
+            echo "     (Manage Jenkins → Manage Credentials → (global) → Add Credentials → Kind: Secret text)."
+            echo "  2) Ensure a SonarQube server with name '${env.SONAR_SERVER}' is configured in Jenkins (Manage Jenkins → Configure System → SonarQube servers)."
+            echo "  3) Or run the job with SKIP_SONAR=true to skip SonarQube analysis."
+            echo "-----------------------------------------------------------------"
+            error("SonarQube analysis aborted: ${err}")
           }
         }
       }
