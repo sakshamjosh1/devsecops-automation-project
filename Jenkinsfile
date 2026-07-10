@@ -60,6 +60,25 @@ pipeline {
             }
         }
 
+        stage('OWASP Dependency Check') {
+        steps {
+
+            dependencyCheck(
+                odcInstallation: 'DependencyCheck',
+                additionalArguments: '''
+                    --scan .
+                    --format HTML
+                    --format XML
+                    --out dependency-check-report
+                '''
+            )
+
+            dependencyCheckPublisher(
+                pattern: 'dependency-check-report/dependency-check-report.xml'
+            )
+        }
+    }
+
         stage('Build Docker Image') {
                 steps {
                     sh """
