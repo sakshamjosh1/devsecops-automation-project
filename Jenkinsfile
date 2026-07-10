@@ -61,28 +61,23 @@ pipeline {
         }
 
         stage('Build Docker Image') {
-            steps {
+                steps {
+                    sh """
+                    docker build \
+                    -t ${IMAGE_NAME}:${IMAGE_TAG} \
+                    -t ${IMAGE_NAME}:latest .
+                    """
+                }
+            }
 
+        stage('Trivy Scan') {
+            steps {
                 sh """
                 trivy image \
                 --severity HIGH,CRITICAL \
                 --format table \
                 ${IMAGE_NAME}:${IMAGE_TAG}
                 """
-
-            }
-        }
-
-        stage('Trivy Scan') {
-            steps {
-
-                sh """
-                trivy image \
-                  --severity HIGH,CRITICAL \
-                  
-                  ${IMAGE_NAME}:${IMAGE_TAG}
-                """
-
             }
         }
 
