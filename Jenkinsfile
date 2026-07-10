@@ -1,156 +1,152 @@
-// Jenkinsfile (Declarative Pipeline) - Full file (SKIP_SONAR default = true)
-// Behavior: Sonar analysis is skipped by default so job finishes SUCCESS unless other stages fail.
-// To run Sonar: set SKIP_SONAR=false when you run the job, AND create the Sonar credential + server.
-
 pipeline {
-  agent any
+    agent any
 
-  environment {
-    IMAGE_NAME = "devsecops-simple"
-    IMAGE_TAG  = "${env.BUILD_NUMBER ?: 'local'}"
-
-    // Sonar settings - change to match your Jenkins config if needed
-    SONAR_SERVER      = "SonarQube"    // SonarQube server name in Jenkins (Manage Jenkins → Configure System)
-    SONAR_CREDENTIALS = "sonar-token"  // credentialsId of Secret text credential holding Sonar token
-  }
-
-  parameters {
-    booleanParam(name: 'PUSH_TO_REGISTRY', defaultValue: false, description: 'If true, push image to Docker Hub after build')
-    booleanParam(name: 'SKIP_SONAR', defaultValue: true, description: 'If true, skip SonarQube analysis (default: true)')
-    booleanParam(name: 'FAIL_ON_MISSING_SONAR_CREDENTIAL', defaultValue: false, description: 'If true, fail build when Sonar credential is missing (default: continue)')
-  }
-
-  stages {
-
-    stage('Checkout') {
-      steps {
-        echo "Checking out repository..."
-        checkout scm
-      }
+    environment {
+        IMAGE_NAME = "devsecops-task-api"
+        IMAGE_TAG = "${BUILD_NUMBER}"
     }
 
-    stage('Build & Test') {
-      steps {
-        echo "Running: mvn -B clean test package"
-        sh '''
-          set -e
-          mvn -B clean test package
-        '''
-      }
+    parameters {
+        booleanParam(
+            name: 'PUSH_TO_DOCKERHUB',
+            defaultValue: false,
+            description: 'Push Docker image to Docker Hub'
+        )
     }
 
-    stage('Build Docker Image') {
-      steps {
-        script {
-          // Disable BuildKit for compatibility with some environments
-          withEnv(['DOCKER_BUILDKIT=0']) {
-            echo "Building Docker image ${IMAGE_NAME}:latest (BuildKit disabled)"
-            sh """
-              set -e
-              docker build -t ${IMAGE_NAME}:latest .
-            """
-          }
-
-          echo "Tagging image ${IMAGE_NAME}:latest -> ${IMAGE_NAME}:${IMAGE_TAG}"
-          sh """
-            set -e
-            docker tag ${IMAGE_NAME}:latest ${IMAGE_NAME}:${IMAGE_TAG}
-          """
-        }
-      }
+    tools {
+        jdk 'jdk17'
+        maven 'maven3'
     }
 
-    stage('SonarQube Analysis') {
-      when {
-        allOf {
-          expression { return params.SKIP_SONAR == false }
-        }
-      }
-      steps {
-        script {
-          try {
-            // Attempt to fetch Sonar token
-            withCredentials([string(credentialsId: env.SONAR_CREDENTIALS, variable: 'SONAR_TOKEN')]) {
-              withSonarQubeEnv(env.SONAR_SERVER) {
-                sh '''
-                  set -e
-                  echo "Running SonarQube analysis (server: ${SONAR_SERVER})..."
-                  mvn -B sonar:sonar -Dsonar.login=$SONAR_TOKEN
-                '''
-              }
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
             }
-          } catch (Exception err) {
-            echo "-----------------------------------------------------------------"
-            echo "WARNING: SonarQube analysis couldn't run."
-            echo "Reason: ${err}"
-            echo ""
-            echo "To enable Sonar analysis:"
-            echo "  1) Create Jenkins Secret text credential with ID '${env.SONAR_CREDENTIALS}' and value = your Sonar token."
-            echo "  2) Configure a SonarQube server in Jenkins with name '${env.SONAR_SERVER}'."
-            echo "  3) Run the job with SKIP_SONAR=false."
-            echo "-----------------------------------------------------------------"
+        }
 
-            if (params.FAIL_ON_MISSING_SONAR_CREDENTIAL) {
-              error("SonarQube analysis aborted due to missing credentials or misconfiguration.")
-            } else {
-              // Keep build SUCCESS if SKIP_SONAR==true by default; if Sonar was requested but failed, mark UNSTABLE
-              if (params.SKIP_SONAR == false) {
-                currentBuild.result = 'UNSTABLE'
-                echo "Build marked UNSTABLE because SonarQube analysis was requested but couldn't run."
-              } else {
-                // SKIP_SONAR true -> silently continue (success)
-                echo "Sonar skipped (default). Continuing build as SUCCESS."
-              }
+        stage('Build & Test') {
+            steps {
+                sh 'mvn clean verify'
             }
-          }
+
+            post {
+                always {
+                    junit 'target/surefire-reports/*.xml'
+                }
+            }
         }
-      }
-    }
 
-    stage('Push to Docker Hub') {
-      when {
-        expression { return params.PUSH_TO_REGISTRY == true }
-      }
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
-          script {
-            sh '''
-              set -e
-              echo "Logging into Docker Hub as $DOCKERHUB_USER"
-              echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    withCredentials([
+                        string(
+                            credentialsId: 'sonar-token',
+                            variable: 'SONAR_TOKEN'
+                        )
+                    ]) {
 
-              echo "Tagging and pushing: ${IMAGE_NAME}:${IMAGE_TAG} -> $DOCKERHUB_USER/${IMAGE_NAME}:${IMAGE_TAG}"
-              docker tag ${IMAGE_NAME}:${IMAGE_TAG} $DOCKERHUB_USER/${IMAGE_NAME}:${IMAGE_TAG}
-              docker push $DOCKERHUB_USER/${IMAGE_NAME}:${IMAGE_TAG}
+                        sh '''
+                        mvn sonar:sonar \
+                          -Dsonar.projectKey=devsecops-automation-project \
+                          -Dsonar.token=$SONAR_TOKEN
+                        '''
 
-              echo "Updating latest tag and pushing"
-              docker tag ${IMAGE_NAME}:latest $DOCKERHUB_USER/${IMAGE_NAME}:latest
-              docker push $DOCKERHUB_USER/${IMAGE_NAME}:latest
-
-              docker logout
-            '''
-          }
+                    }
+                }
+            }
         }
-      }
+
+        stage('Build Docker Image') {
+            steps {
+
+                sh """
+                docker build \
+                -t ${IMAGE_NAME}:${IMAGE_TAG} \
+                -t ${IMAGE_NAME}:latest .
+                """
+
+            }
+        }
+
+        stage('Trivy Scan') {
+            steps {
+
+                sh """
+                trivy image \
+                  --severity HIGH,CRITICAL \
+                  --exit-code 1 \
+                  ${IMAGE_NAME}:${IMAGE_TAG}
+                """
+
+            }
+        }
+
+        stage('Push Docker Image') {
+
+            when {
+                expression { params.PUSH_TO_DOCKERHUB }
+            }
+
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-creds',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )
+                ]) {
+
+                    sh """
+
+                    echo \$DOCKER_PASS | docker login \
+                        -u \$DOCKER_USER \
+                        --password-stdin
+
+                    docker tag ${IMAGE_NAME}:${IMAGE_TAG} \
+                        \$DOCKER_USER/${IMAGE_NAME}:${IMAGE_TAG}
+
+                    docker tag ${IMAGE_NAME}:latest \
+                        \$DOCKER_USER/${IMAGE_NAME}:latest
+
+                    docker push \$DOCKER_USER/${IMAGE_NAME}:${IMAGE_TAG}
+                    docker push \$DOCKER_USER/${IMAGE_NAME}:latest
+
+                    docker logout
+
+                    """
+
+                }
+
+            }
+
+        }
+
     }
 
-  } // end stages
+    post {
 
-  post {
-    always {
-      echo "Running post actions: junit and artifact archive"
-      junit allowEmptyResults: true, testResults: 'target/surefire-reports/*.xml'
-      archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
-      echo "Post actions complete."
+        always {
+
+            archiveArtifacts(
+                artifacts: 'target/*.jar',
+                fingerprint: true
+            )
+
+        }
+
+        success {
+            echo "Pipeline completed successfully."
+        }
+
+        failure {
+            echo "Pipeline failed."
+        }
+
     }
-    success {
-      echo "Pipeline finished SUCCESS — image: ${IMAGE_NAME}:${IMAGE_TAG}"
-    }
-    unstable {
-      echo "Pipeline finished UNSTABLE — check warnings (e.g., Sonar requested but couldn't run)."
-    }
-    failure {
-      echo "Pipeline FAILED — inspect console output for details."
-    }
-  }
+
 }
