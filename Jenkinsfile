@@ -61,23 +61,25 @@ pipeline {
         }
 
         stage('OWASP Dependency Check') {
-        steps {
+            steps {
 
-            dependencyCheck(
-                odcInstallation: 'DependencyCheck',
-                additionalArguments: '''
-                    --scan .
-                    --format HTML
-                    --format XML
-                    --out dependency-check-report
-                '''
-            )
+                sh 'mkdir -p dependency-check-report'
 
-            dependencyCheckPublisher(
-                pattern: 'dependency-check-report/dependency-check-report.xml'
-            )
+                dependencyCheck(
+                    odcInstallation: 'DependencyCheck',
+                    additionalArguments: '''
+                        --scan .
+                        --format HTML
+                        --format XML
+                        --out dependency-check-report
+                    '''
+                )
+
+                dependencyCheckPublisher(
+                    pattern: 'dependency-check-report/dependency-check-report.xml'
+                )
+            }
         }
-    }
 
         stage('Build Docker Image') {
                 steps {
