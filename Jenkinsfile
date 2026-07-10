@@ -64,9 +64,10 @@ pipeline {
             steps {
 
                 sh """
-                docker build \
-                -t ${IMAGE_NAME}:${IMAGE_TAG} \
-                -t ${IMAGE_NAME}:latest .
+                trivy image \
+                --severity HIGH,CRITICAL \
+                --format table \
+                ${IMAGE_NAME}:${IMAGE_TAG}
                 """
 
             }
